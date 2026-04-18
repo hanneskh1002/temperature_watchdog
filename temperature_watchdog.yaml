@@ -1,0 +1,144 @@
+blueprint:
+  name: Temperatur Watchdog mit Wiederholalarm
+  description: >
+    Überwacht einen Temperatursensor. Alarmiert sofort bei Überschreitung
+    eines Grenzwerts und wiederholt die Benachrichtigung in einem festen
+    Intervall. Zusätzlich Alarm, wenn über eine definierte Zeit kein neuer
+    Sensorwert empfangen wurde.
+  domain: automation
+  input:
+    temperature_sensor:
+      name: Temperatursensor
+      selector:
+        entity:
+          domain: sensor
+
+    device_name:
+      name: Gerätename
+      description: Freier Name für die Benachrichtigung
+      default: Gerät
+      selector:
+        text:
+
+    high_temp_threshold:
+      name: Alarmgrenze Temperatur
+      description: Alarm, wenn Temperatur größer als dieser Wert ist
+      default: -10
+      selector:
+        number:
+          min: -50
+          max: 100
+          step: 0.5
+          mode: box
+
+    clear_temp_threshold:
+      name: Entwarnungsgrenze
+      description: Unterhalb dieses Werts gilt der Alarm wieder als beendet
+      default: -12
+      selector:
+        number:
+          min: -50
+          max: 100
+          step: 0.5
+          mode: box
+
+    repeat_minutes:
+      name: Wiederholintervall in Minuten
+      default: 20
+      selector:
+        number:
+          min: 1
+          max: 240
+          step: 1
+          mode: box
+
+    stale_hours:
+      name: Sensor-Timeout in Stunden
+      default: 12
+      selector:
+        number:
+          min: 1
+          max: 168
+          step: 1
+          mode: box
+
+    notify_service:
+      name: Notify-Service
+      description: z. B. notify.notify oder notify.mobile_app_pixel
+      selector:
+        text:
+
+mode: single
+
+variables:
+  sensor_entity: !input temperature_sensor
+  device_name: !input device_name
+  high_temp_threshold: !input high_temp_threshold
+  clear_temp_threshold: !input clear_temp_threshold
+  repeat_minutes: !input repeat_minutes
+  stale_hours: !input stale_hours
+  notify_service: !input notify_service
+
+  sensor_value: "{{ states(sensor_entity) }}"
+  sensor_value_float: "{{ states(sensor_entity) | float(999) }}"
+  last_updated_ts: >
+    {{ as_timestamp(states[sensor_entity].last_updated) if states[sensor_entity] is not none else 0 }}
+  now_ts: "{{ as_timestamp(now()) }}"
+  stale_seconds: "{{ (stale_hours | float(0)) * 3600 }}"
+  is_stale: "{{ (now_ts - last_updated_ts) > stale_seconds }}"
+  is_high: >
+    {{ sensor_value not in ['unknown', 'unavailable', 'none', 'None', ''] and sensor_value_float > (high_temp_threshold | float) }}
+
+trigger:
+  - trigger: state
+    entity_id: !input temperature_sensor
+
+  - trigger: time_pattern
+    minutes: "/5"
+
+condition: []
+
+action:
+  - choose:
+      # Sensor-Ausfall
+      - conditions:
+          - condition: template
+            value_template: "{{ is_stale }}"
+          - condition: template
+            value_template: >
+              {{ trigger.platform == 'state'
+                 or (now().minute % (repeat_minutes | int)) == 0 }}
+        sequence:
+          - action: "{{ notify_service }}"
+            data:
+              title: "⚠️ {{ device_name }} Sensorproblem"
+              message: >
+                Seit über {{ stale_hours }} Stunden kein neuer Messwert.
+                Letztes Update:
+                {{ as_local(states[sensor_entity].last_updated).strftime('%d.%m.%Y %H:%M:%S') }}
+
+      # Temperatur zu hoch
+      - conditions:
+          - condition: template
+            value_template: "{{ is_high }}"
+          - condition: template
+            value_template: >
+              {{ trigger.platform == 'state'
+                 or (now().minute % (repeat_minutes | int)) == 0 }}
+        sequence:
+          - action: "{{ notify_service }}"
+            data:
+              title: "⚠️ {{ device_name }} zu warm"
+              message: >
+                Aktuelle Temperatur: {{ sensor_value }} °C.
+                Grenzwert: {{ high_temp_threshold }} °C.
+
+      # Optional: Entwarnung bei Rückkehr in sicheren Bereich
+      - conditions:
+          - condition: trigger
+            id: []
+          - condition: template
+            value_template: >
+              {{ sensor_value not in ['unknown', 'unavailable', 'none', 'None', '']
+                 and sensor_value_float < (clear_temp_threshold | float) }}
+        sequence: []
